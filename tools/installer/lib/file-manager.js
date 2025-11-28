@@ -6,6 +6,7 @@ const chalk = require('chalk');
 const { createReadStream, createWriteStream, promises: fsPromises } = require('node:fs');
 const { pipeline } = require('node:stream/promises');
 const resourceLocator = require('./resource-locator');
+const SecurityUtils = require('../../lib/security-utils');
 
 class FileManager {
   constructor() {}
@@ -300,6 +301,15 @@ class FileManager {
 
   async copyFileWithRootReplacement(source, destination, rootValue) {
     try {
+      // Validate rootValue to prevent injection attacks
+      const validation = SecurityUtils.sanitizeStringValue(rootValue, 2048);
+      if (!validation.valid) {
+        console.error(chalk.red(`Invalid root value for replacement: ${validation.error}`));
+        return false;
+      }
+
+      const safeRootValue = validation.sanitized;
+
       // Check file size to determine if we should stream
       const stats = await fs.stat(source);
 
@@ -309,7 +319,7 @@ class FileManager {
         const { Transform } = require('node:stream');
         const replaceStream = new Transform({
           transform(chunk, encoding, callback) {
-            const modified = chunk.toString().replaceAll('{root}', rootValue);
+            const modified = chunk.toString().replaceAll('{root}', safeRootValue);
             callback(null, modified);
           },
         });
@@ -323,7 +333,7 @@ class FileManager {
       } else {
         // Regular approach for smaller files
         const content = await fsPromises.readFile(source, 'utf8');
-        const updatedContent = content.replaceAll('{root}', rootValue);
+        const updatedContent = content.replaceAll('{root}', safeRootValue);
         await this.ensureDirectory(path.dirname(destination));
         await fsPromises.writeFile(destination, updatedContent, 'utf8');
       }

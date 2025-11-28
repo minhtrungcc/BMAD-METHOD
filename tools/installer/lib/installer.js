@@ -8,6 +8,7 @@ const configLoader = require('./config-loader');
 const ideSetup = require('./ide-setup');
 const { extractYamlFromAgent } = require('../../lib/yaml-utils');
 const resourceLocator = require('./resource-locator');
+const SecurityUtils = require('../../lib/security-utils');
 
 class Installer {
   async getCoreVersion() {
@@ -29,10 +30,17 @@ class Installer {
       // Store the original CWD where npx was executed
       const originalCwd = process.env.INIT_CWD || process.env.PWD || process.cwd();
 
-      // Resolve installation directory relative to where the user ran the command
-      let installDir = path.isAbsolute(config.directory)
-        ? config.directory
-        : path.resolve(originalCwd, config.directory);
+      // Validate and resolve installation directory to prevent path traversal attacks
+      const pathValidation = SecurityUtils.validatePath(config.directory, originalCwd);
+
+      if (!pathValidation.valid) {
+        spinner.fail(chalk.red('Invalid installation directory'));
+        console.error(chalk.red(`Security Error: ${pathValidation.error}`));
+        console.error(chalk.yellow(`Attempted path: ${config.directory}`));
+        process.exit(1);
+      }
+
+      let installDir = pathValidation.sanitized;
 
       if (path.basename(installDir) === '.bmad-core') {
         // If user points directly to .bmad-core, treat its parent as the project root
@@ -88,6 +96,13 @@ class Installer {
                   if (!input.trim()) {
                     return 'Please enter a valid directory path';
                   }
+
+                  // Validate path for security
+                  const validation = SecurityUtils.validatePath(input, originalCwd);
+                  if (!validation.valid) {
+                    return `Invalid path: ${validation.error}`;
+                  }
+
                   return true;
                 },
               },
@@ -1898,19 +1913,12 @@ class Installer {
   }
 
   compareVersions(v1, v2) {
-    // Simple semver comparison
-    const parts1 = v1.split('.').map(Number);
-    const parts2 = v2.split('.').map(Number);
+    // Use secure version comparison from SecurityUtils
+    const result = SecurityUtils.compareVersions(v1, v2);
 
-    for (let index = 0; index < 3; index++) {
-      const part1 = parts1[index] || 0;
-      const part2 = parts2[index] || 0;
-
-      if (part1 > part2) return 1;
-      if (part1 < part2) return -1;
-    }
-
-    return 0;
+    // If validation fails, return 0 (treat as equal) to prevent errors
+    // Warning is already logged by SecurityUtils
+    return result === null ? 0 : result;
   }
 
   async cleanupLegacyYmlFiles(installDir, spinner) {
@@ -1980,13 +1988,32 @@ class Installer {
 
     const arguments_ = [];
     if (options.input) {
-      arguments_.push('--input', options.input);
+      // Validate input path
+      const inputValidation = SecurityUtils.validatePath(options.input);
+      if (!inputValidation.valid) {
+        console.error(chalk.red(`Invalid input path: ${inputValidation.error}`));
+        process.exit(1);
+      }
+      arguments_.push('--input', inputValidation.sanitized);
     }
     if (options.output) {
-      arguments_.push('--output', options.output);
+      // Validate output path
+      const outputValidation = SecurityUtils.validatePath(options.output);
+      if (!outputValidation.valid) {
+        console.error(chalk.red(`Invalid output path: ${outputValidation.error}`));
+        process.exit(1);
+      }
+      arguments_.push('--output', outputValidation.sanitized);
     }
 
-    const child = spawn('node', [flattenerPath, ...arguments_], {
+    // Additional validation for all arguments
+    const argsValidation = SecurityUtils.validateCommandArgs(arguments_);
+    if (!argsValidation.valid) {
+      console.error(chalk.red(`Invalid command arguments: ${argsValidation.error}`));
+      process.exit(1);
+    }
+
+    const child = spawn('node', [flattenerPath, ...argsValidation.sanitized], {
       stdio: 'inherit',
       cwd: process.cwd(),
     });
